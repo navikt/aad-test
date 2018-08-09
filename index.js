@@ -1,7 +1,11 @@
 const express = require('express');
+const url = require('url');
 const fetch = require('node-fetch');
+const HttpsProxyAgent = require('https-proxy-agent');
 const querystring = require('querystring');
 const config = require('./config');
+
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 const entityMap = {
     '&': '&amp;',
@@ -14,6 +18,11 @@ const entityMap = {
     '=': '&#x3D;'
 };
 
+const agent = new HttpsProxyAgent({
+    ...url.parse('http://webproxy-utvikler.nav.no:8088'),
+    rejectUnauthorized: false
+});
+
 function escape (string) {
     return String(string).replace(/[&<>"'`=\/]/g, function fromEntityMap (s) {
         return entityMap[s];
@@ -22,7 +31,9 @@ function escape (string) {
 
 async function runApp() {
     console.log('uri', config.discoveryUri);
-    const response = await fetch(config.discoveryUri);
+    const response = await fetch(config.discoveryUri, {
+        agent
+    });
     const discovery = await response.json();
     const { authorization_endpoint, token_endpoint } = discovery;
 
@@ -44,6 +55,7 @@ async function runApp() {
         }
         const code = req.query.code;
         const tokenRes = await fetch(token_endpoint, {
+            agent,
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
@@ -57,43 +69,43 @@ async function runApp() {
             })
         });
         const data = await tokenRes.json();
+
+        if (tokenRes.status != 200) {
+            res.send('<h1>Authentication Error</h1>' + data.error_description);
+            return;
+        }
+
         const idToken = data.id_token;
+        const encodedToken = Buffer.from(idToken, 'utf-8').toString('base64');
 
         let text = '';
         try {
+            const body = `<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Header><wsse:Security soap:mustUnderstand="1" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"><wsse:UsernameToken xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="UsernameToken-2aa9eb5e-df63-49f8-acba-62e32f7465e6"><wsse:Username>${config.systemUser}</wsse:Username><wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">${config.systemPassword}</wsse:Password></wsse:UsernameToken></wsse:Security></soap:Header><soap:Body><wst:RequestSecurityToken xmlns:wst="http://docs.oasis-open.org/ws-sx/ws-trust/200512"><wst:SecondaryParameters xmlns:wst="http://docs.oasis-open.org/ws-sx/ws-trust/200512">
+<wst:TokenType>http://docs.oasis-open.org/wss/oasis-wss-saml-token-profile-1.1#SAMLV2.0</wst:TokenType>
+</wst:SecondaryParameters><wst:KeyType>http://docs.oasis-open.org/ws-sx/ws-trust/200512/Bearer</wst:KeyType><wst:RequestType>http://docs.oasis-open.org/ws-sx/ws-trust/200512/Issue</wst:RequestType><wst:OnBehalfOf><wsse:BinarySecurityToken xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="urn:ietf:params:oauth:token-type:jwt">${encodedToken}</wsse:BinarySecurityToken></wst:OnBehalfOf><wst:Renewing Allow="false"/></wst:RequestSecurityToken></soap:Body></soap:Envelope>`;
+
+            console.log('==========');
+            console.log(body);
+            console.log('==========');
+
             const stsResponse = await fetch(config.stsUrl, {
                 method: 'post',
                 headers: {
-                    'Content-Type': 'text/xml',
-                    'SoapAction': 'http://docs.oasis-open.org/ws-sx/ws-trust/200512/RST/Issue'
+                    'content-type': 'text/xml; charset=UTF-8',
+                    accept: '*/*',
+                    soapaction: '"http://docs.oasis-open.org/ws-sx/ws-trust/200512/RST/Issue"',
+                    'user-agent': 'Apache-CXF/3.2.1',
+                    'cache-control': 'no-cache',
+                    pragma: 'no-cache'
                 },
-                body: `
-<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-<soap:Header>
-<wsse:Security soap:mustUnderstand="1" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-<wsse:UsernameToken xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="UsernameToken-76db6c8f-9de8-4cdf-a23d-3335676df8e7">
-<wsse:Username>${config.systemUser}</wsse:Username>
-<wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">${config.systemPassword}</wsse:Password>
-</wsse:UsernameToken>
-</wsse:Security>
-</soap:Header>
-<soap:Body>
-<wst:RequestSecurityToken xmlns:wst="http://docs.oasis-open.org/ws-sx/ws-trust/200512">
-<wst:SecondaryParameters xmlns:wst="http://docs.oasis-open.org/ws-sx/ws-trust/200512">
-        <wst:TokenType>http://docs.oasis-open.org/wss/oasis-wss-saml-token-profile-1.1#SAMLV2.0</wst:TokenType>
-</wst:SecondaryParameters>
-<wst:KeyType>http://docs.oasis-open.org/ws-sx/ws-trust/200512/Bearer</wst:KeyType>
-<wst:RequestType>http://docs.oasis-open.org/ws-sx/ws-trust/200512/Issue</wst:RequestType>
-<wst:OnBehalfOf>
-<wsse:BinarySecurityToken xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="urn:ietf:params:oauth:token-type:jwt">${idToken}</wsse:BinarySecurityToken>
-</wst:OnBehalfOf>
-<wst:Renewing Allow="false"/>
-</wst:RequestSecurityToken>
-</soap:Body>
-</soap:Envelope>`
+                body
             });
 
-            const text = await stsResponse.text();
+            console.log('Response status: ' + stsResponse.status);
+
+            text = await stsResponse.text();
+
+            console.log(text);
         } catch (err) {
             text = 'Could not get SAML token: ' + err;
         }
